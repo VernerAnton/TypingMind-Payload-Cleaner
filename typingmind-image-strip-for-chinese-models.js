@@ -38,9 +38,8 @@
   // Use the exact OpenRouter model ID prefix or full ID (case-insensitive).
   // Kimi (moonshot/*) and vision-capable Xiaomi models are intentionally excluded.
   const IMAGE_UNSUPPORTED_MODELS = [
-    // ── Add model IDs here, e.g.: ──────────────────────────────────────────
-    // "qwen/qwen-turbo",
-    // "deepseek/deepseek-chat",
+    "deepseek/",
+    "minimax/",
   ];
 
   // Build a fast lookup set (lower-cased)
