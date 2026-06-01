@@ -1,16 +1,18 @@
 /**
  * TypingMind Extension: Payload Debugger (TEMPORARY — remove after debugging)
  * ────────────────────────────────────────────────────────────────────────────
- * Logs every outgoing OpenRouter payload to the browser console in full.
- * Does NOT modify anything — purely observational.
+ * The reasoning_details error is thrown BEFORE fetch is called, meaning
+ * TypingMind resolves attachments from IndexedDB first. This debugger patches
+ * IndexedDB to log every read so we can see exactly what key TM looks up
+ * for the reasoning attachment.
  *
  * HOW TO USE:
  *   1. Install this extension in TypingMind
  *   2. Open browser DevTools → Console tab
  *   3. Reproduce the problem (send a message after using the thinking feature)
- *   4. Look for the log lines starting with [payload-debugger]
- *   5. Expand the logged object and copy the full payload
- *   6. Share it so the cleaner rules can be fixed
+ *   4. Look for lines starting with [idb-debugger] — especially any that
+ *      mention "reasoning" or show a UUID matching the attachment filename
+ *   5. Screenshot or copy those log lines and share them
  *
  * Remove this extension once debugging is done.
  */
@@ -22,8 +24,54 @@
   }
   window.__payloadDebuggerInstalled = true;
 
-  const OPENROUTER_ENDPOINT = "openrouter.ai/api/v1/chat/completions";
+  // ── IndexedDB read interceptor ─────────────────────────────────────────────
+  // Wraps IDBObjectStore.get to log every key TM reads from IDB.
+  // This fires during attachment resolution, before fetch is ever called.
+  const originalIDBGet = IDBObjectStore.prototype.get;
+  IDBObjectStore.prototype.get = function (key) {
+    const storeName = this.name;
+    const request = originalIDBGet.call(this, key);
 
+    const keyStr = typeof key === "string" ? key : JSON.stringify(key);
+
+    // Log everything so nothing is missed, but highlight likely attachment reads
+    const isInteresting =
+      typeof keyStr === "string" &&
+      (keyStr.includes("reasoning") ||
+        keyStr.includes("attachment") ||
+        keyStr.includes("file") ||
+        // UUID pattern — TM uses UUIDs as attachment keys
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(keyStr));
+
+    if (isInteresting) {
+      console.warn(`[idb-debugger] ⚠️  IDB GET  store="${storeName}"  key=${keyStr}`);
+    } else {
+      console.log(`[idb-debugger] IDB GET  store="${storeName}"  key=${keyStr}`);
+    }
+
+    request.addEventListener("success", () => {
+      if (isInteresting) {
+        console.warn(`[idb-debugger] ⚠️  IDB RESULT  store="${storeName}"  key=${keyStr}  result=`, request.result);
+      }
+    });
+
+    request.addEventListener("error", () => {
+      console.error(`[idb-debugger] IDB ERROR  store="${storeName}"  key=${keyStr}`, request.error);
+    });
+
+    return request;
+  };
+
+  // ── Also patch IDBObjectStore.getAll for completeness ─────────────────────
+  const originalGetAll = IDBObjectStore.prototype.getAll;
+  IDBObjectStore.prototype.getAll = function (query) {
+    const storeName = this.name;
+    console.log(`[idb-debugger] IDB GETALL  store="${storeName}"  query=`, query ?? "(none)");
+    return originalGetAll.apply(this, arguments);
+  };
+
+  // ── Fetch interceptor (kept as fallback) ───────────────────────────────────
+  const OPENROUTER_ENDPOINT = "openrouter.ai/api/v1/chat/completions";
   const originalFetch = window.fetch.bind(window);
 
   window.fetch = async function (input, init) {
@@ -35,56 +83,28 @@
           ? input
           : input?.toString?.() ?? "";
 
-      if (!url.includes(OPENROUTER_ENDPOINT)) {
-        return originalFetch(input, init);
+      if (url.includes(OPENROUTER_ENDPOINT)) {
+        let bodyText;
+        if (init && typeof init.body === "string") {
+          bodyText = init.body;
+        } else if (input instanceof Request) {
+          bodyText = await input.clone().text();
+        }
+        if (bodyText) {
+          try {
+            const payload = JSON.parse(bodyText);
+            console.group(`[payload-debugger] Outgoing fetch → model: ${payload?.model ?? "unknown"}`);
+            console.log("Full payload:", JSON.parse(JSON.stringify(payload)));
+            console.groupEnd();
+          } catch {}
+        }
       }
-
-      let bodyText;
-      if (init && typeof init.body === "string") {
-        bodyText = init.body;
-      } else if (input instanceof Request) {
-        bodyText = await input.clone().text();
-      } else {
-        return originalFetch(input, init);
-      }
-
-      let payload;
-      try {
-        payload = JSON.parse(bodyText);
-      } catch {
-        return originalFetch(input, init);
-      }
-
-      console.group(`[payload-debugger] Outgoing request → model: ${payload?.model ?? "unknown"}`);
-      console.log("Full payload:", JSON.parse(JSON.stringify(payload)));
-      console.log("Messages count:", payload?.messages?.length ?? 0);
-
-      if (Array.isArray(payload?.messages)) {
-        payload.messages.forEach((msg, i) => {
-          const contentSummary = Array.isArray(msg.content)
-            ? msg.content.map((p) => p?.type ?? typeof p).join(", ")
-            : typeof msg.content;
-          console.log(`  [${i}] role=${msg.role} | content: ${contentSummary}`);
-
-          // Highlight any part that might be a reasoning attachment
-          if (Array.isArray(msg.content)) {
-            msg.content.forEach((part, j) => {
-              if (part && typeof part === "object" && part.type !== "text") {
-                console.warn(`    ⚠️  Non-text part at messages[${i}].content[${j}]:`, JSON.parse(JSON.stringify(part)));
-              }
-            });
-          }
-        });
-      }
-
-      console.groupEnd();
     } catch (err) {
-      console.error("[payload-debugger] Error during logging:", err);
+      console.error("[payload-debugger] Fetch logging error:", err);
     }
 
-    // Always pass through unmodified
     return originalFetch(input, init);
   };
 
-  console.log("✅ [payload-debugger] Payload debugger installed. Open DevTools Console and reproduce the issue.");
+  console.log("✅ [payload-debugger] IDB + fetch debugger installed. Reproduce the issue and share the [idb-debugger] ⚠️ lines.");
 })();
